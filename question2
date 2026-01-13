@@ -1,0 +1,76 @@
+# ---------------------------
+# Q2: Recovery by region since 2019
+# ---------------------------
+
+# 1) Select the main time column (we use first available)
+time_col <- "time_period_1"
+
+# 2) Select region-related columns
+region_cols <- c(
+  "journeys_between_regions_thousands",
+  "journeys_within_regions_thousands",
+  "journeys_between_england_and_scotland_thousands",
+  "journeys_between_england_and_wales_thousands",
+  "journeys_between_scotland_and_wales_thousands",
+  "journeys_within_england_thousands",
+  "journeys_within_scotland_thousands",
+  "journeys_within_wales_thousands"
+)
+
+# Keep only columns present in your dataset
+region_cols <- region_cols[region_cols %in% names(demand_raw)]
+
+# 3) Pivot longer to region/year/journeys
+reg_long <- demand_raw %>%
+  rename(time_period = all_of(time_col)) %>%
+  pivot_longer(
+    cols = all_of(region_cols),
+    names_to = "region_raw",
+    values_to = "journeys_thousands"
+  ) %>%
+  mutate(
+    year = as.integer(str_extract(as.character(time_period), "\\d{4}")),
+    journeys_thousands = as.numeric(str_remove_all(as.character(journeys_thousands), "[^0-9\\.-]")),
+    journeys_millions = journeys_thousands / 1000
+  ) %>%
+  filter(!is.na(year))
+
+# 4) Compute baseline (2019) and latest recovery
+baseline2019 <- reg_long %>%
+  filter(year == 2019) %>%
+  group_by(region_raw) %>%
+  summarise(base_journeys = sum(journeys_millions, na.rm = TRUE), .groups = "drop")
+
+latest_year <- max(reg_long$year, na.rm = TRUE)
+latest <- reg_long %>%
+  filter(year == latest_year) %>%
+  group_by(region_raw) %>%
+  summarise(latest_journeys = sum(journeys_millions, na.rm = TRUE), .groups = "drop")
+
+recovery <- baseline2019 %>%
+  left_join(latest, by = "region_raw") %>%
+  mutate(recovery_pct = latest_journeys / base_journeys * 100) %>%
+  arrange(desc(recovery_pct))
+
+message("Recovery by region (top rows):")
+print(head(recovery, 10))
+
+# 5) Plot bar chart of recovery %
+p_q2_bar <- ggplot(recovery, aes(x = reorder(region_raw, recovery_pct), y = recovery_pct)) +
+  geom_col(fill = "steelblue") +
+  coord_flip() +
+  labs(title = paste0("Q2: Recovery since 2019 to ", latest_year, " by region"),
+       x = "Region", y = "Recovery (% of 2019)") +
+  theme_minimal()
+
+print(p_q2_bar)
+
+# 6) Time series of top 6 regions
+top_regions <- head(recovery$region_raw, 6)
+p_q2_ts <- ggplot(reg_long %>% filter(region_raw %in% top_regions),
+                  aes(x = year, y = journeys_millions, color = region_raw)) +
+  geom_line(size = 1) +
+  labs(title = "Q2: Time series of journeys (top regions)", x = "Year", y = "Journeys (millions)") +
+  theme_minimal()
+
+print(p_q2_ts)
