@@ -5,7 +5,7 @@
 # 1) Select the main time column (we use first available)
 time_col <- "time_period_1"
 
-# 2) Select region-related columns
+# 2) Select region-related columns 
 region_cols <- c(
   "journeys_between_regions_thousands",
   "journeys_within_regions_thousands",
