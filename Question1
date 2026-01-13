@@ -1,0 +1,179 @@
+
+needed <- c("tidyverse", "janitor", "lubridate", "broom", "scales")
+install_if_missing <- function(pkgs){
+  to_install <- pkgs[!(pkgs %in% installed.packages()[,"Package"])]
+  if(length(to_install)) install.packages(to_install, repos = "https://cloud.r-project.org")
+}
+install_if_missing(needed)
+
+library(tidyverse)
+library(janitor)
+library(lubridate)
+library(broom)
+library(scales)
+
+# ---------------------------
+# Helper to auto-detect header
+# ---------------------------
+read_table_detect_header <- function(path, header_candidates = c("sector","time period","time.period",
+                                                                 "time_period","period","year")) {
+
+  raw <- readLines(path, n = 200, warn = FALSE)
+  raw_lower <- tolower(raw)
+  header_line <- NA_integer_
+
+  for (i in seq_along(raw_lower)) {
+    if (any(str_detect(raw_lower[i], header_candidates))) {
+      header_line <- i
+      break
+    }
+    if (str_detect(raw_lower[i], "\\b20\\d{2}\\b")) {
+      header_line <- max(1, i - 1)
+      break
+    }
+  }
+
+  if (is.na(header_line)) header_line <- 1
+  message("Detected header line ", header_line, " in file: ", path)
+
+  df <- readr::read_csv(path, skip = header_line - 1, show_col_types = FALSE)
+
+  names(df) <- gsub("'", "", names(df))
+  df <- df %>% clean_names()
+
+  return(df)
+}
+
+# Choose column helper
+choose_col <- function(cols, patterns) {
+  for (p in patterns) {
+    idx <- which(str_detect(cols, fixed(p, ignore_case = TRUE)))
+    if (length(idx) > 0) return(cols[idx[1]])
+  }
+  for (p in patterns) {
+    idx <- which(str_detect(cols, regex(p, ignore_case = TRUE)))
+    if (length(idx) > 0) return(cols[idx[1]])
+  }
+  return(NA_character_)
+}
+
+# ---------------------------
+# Load files
+# ---------------------------
+fares_path   <- "/content/7180.csv"
+demand_path  <- "/content/1510.csv"
+punct_path   <- "/content/3194.csv"
+
+fares_raw  <- read_table_detect_header(fares_path)
+demand_raw <- read_table_detect_header(demand_path)
+punct_raw  <- read_table_detect_header(punct_path)
+
+# ---------------------------
+# Clean FARES table (7180)
+# ---------------------------
+fare_year_cols <- colnames(fares_raw)[str_detect(colnames(fares_raw), "\\b\\d{4}\\b|^x\\d{4}$")]
+
+fares_long <- fares_raw %>%
+  rename_with(~ gsub("'", "", .x)) %>%  # extra safety
+  pivot_longer(
+    cols = all_of(fare_year_cols),
+    names_to = "year_raw",
+    values_to = "fare_raw"
+  ) %>%
+  mutate(
+    year = as.integer(str_extract(year_raw, "\\d{4}")),
+    fare_index = as.numeric(str_remove_all(as.character(fare_raw), "[^0-9\\.-]"))
+  )
+
+group_col <- choose_col(colnames(fares_raw), c("regulated", "sector", "fares", "ticket"))
+
+fares_all <- fares_long %>%
+  mutate(group_val = .data[[group_col]]) %>%
+  filter(str_detect(tolower(group_val), "all"))
+
+fares_national <- fares_all %>%
+  group_by(year) %>%
+  summarise(national_fare_index = mean(fare_index, na.rm = TRUE), .groups = "drop")
+
+# ---------------------------
+# Clean DEMAND table (1510)
+# ---------------------------
+d_cols <- colnames(demand_raw)
+time_col  <- choose_col(d_cols, c("time_period","period","year"))
+total_col <- choose_col(d_cols, c("total_journeys","total","journeys"))
+
+demand_clean <- demand_raw %>%
+  rename(time_period = all_of(time_col),
+         total_journeys_raw = all_of(total_col)) %>%
+  mutate(
+    year = as.integer(str_extract(as.character(time_period), "\\d{4}")),
+    total_journeys = as.numeric(str_remove_all(as.character(total_journeys_raw), "[^0-9\\.-]"))
+  ) %>%
+  filter(!is.na(year)) %>%
+  mutate(total_journeys_millions = total_journeys / 1000)
+
+demand_national <- demand_clean %>%
+  group_by(year) %>%
+  summarise(demand_millions = mean(total_journeys_millions, na.rm = TRUE), .groups = "drop")
+
+# ---------------------------
+# Clean PUNCTUALITY table (3194)
+# ---------------------------
+p_cols <- colnames(punct_raw)
+tp_col <- choose_col(p_cols, c("time_period","period"))
+gb_col <- choose_col(p_cols, c("national_great_britain","national"))
+
+punct_clean <- punct_raw %>%
+  rename(time_period = all_of(tp_col)) %>%
+  mutate(
+    year = as.integer(str_extract(as.character(time_period), "\\d{4}")),
+    punctuality = as.numeric(str_remove_all(as.character(.data[[gb_col]]), "[^0-9\\.-]"))
+  ) %>%
+  filter(!is.na(year)) %>%
+  group_by(year) %>%
+  summarise(punctuality_percent = mean(punctuality, na.rm = TRUE), .groups = "drop")
+
+# ---------------------------
+# Build analysis data
+# ---------------------------
+analysis_df <- fares_national %>%
+  inner_join(demand_national, by = "year") %>%
+  left_join(punct_clean, by = "year") %>%
+  arrange(year)
+
+# ---------------------------
+# Q1 Regression + Plots
+# ---------------------------
+lm_q1_simple <- lm(demand_millions ~ national_fare_index, data = analysis_df)
+lm_q1_time   <- lm(demand_millions ~ national_fare_index + year, data = analysis_df)
+
+print(summary(lm_q1_simple))
+print(summary(lm_q1_time))
+
+p_q1_scatter <- ggplot(analysis_df, aes(x = national_fare_index, y = demand_millions)) +
+  geom_point(size = 2) +
+  geom_smooth(method = "lm", se = TRUE, color = "blue") +
+  theme_minimal()
+
+print(p_q1_scatter)
+
+# Time series combined plot (two axes using scaled fares)
+scale_factor <- max(analysis_df$demand_millions, na.rm = TRUE) / max(analysis_df$national_fare_index, na.rm = TRUE)
+p_q1_ts <- ggplot(analysis_df, aes(x = year)) +
+  geom_line(aes(y = demand_millions), color = "darkgreen", size = 1) +
+  geom_line(aes(y = national_fare_index * scale_factor), color = "red", size = 1) +
+  scale_y_continuous(
+    name = "Demand (millions)",
+    sec.axis = sec_axis(~./scale_factor, name = "Fare index")
+  ) +
+  labs(title = "Trend: Demand (millions) and Fare index (scaled)") +
+  theme_minimal()
+
+# Q1 regression: simple model and time-controlled model
+lm_q1_simple <- lm(demand_millions ~ national_fare_index, data = analysis_df)
+lm_q1_time   <- lm(demand_millions ~ national_fare_index + year, data = analysis_df)
+
+message("Q1 regression (simple) summary:")
+print(summary(lm_q1_simple))
+message("Q1 regression (with year) summary:")
+print(summary(lm_q1_time))
