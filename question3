@@ -1,0 +1,40 @@
+# ---------------------------
+# 9) Q3: Predict demand using fares, punctuality, (and optionally reliability)
+#    - Use national series, build regression with fare_index, punctuality, and year
+# ---------------------------
+
+# Prepare modelling dataframe: use analysis_df (national) with possibly lagged predictors or diffs
+model_df <- analysis_df %>% drop_na(national_fare_index, punctuality_percent, demand_millions)
+
+# Option A: levels regression (with year)
+mod1 <- lm(demand_millions ~ national_fare_index + punctuality_percent + year, data = model_df)
+summary_mod1 <- summary(mod1)
+message("Q3 model (levels) summary:")
+print(summary_mod1)
+
+# Option B: differenced (year-on-year growth) to reduce spurious trend
+model_df_diff <- model_df %>%
+  arrange(year) %>%
+  mutate(d_demand = (demand_millions - lag(demand_millions)) / lag(demand_millions),
+         d_fare   = (national_fare_index - lag(national_fare_index)) / lag(national_fare_index),
+         d_punct  = (punctuality_percent - lag(punctuality_percent)) / lag(punctuality_percent)) %>%
+  drop_na()
+
+mod_diff <- lm(d_demand ~ d_fare + d_punct, data = model_df_diff)
+message("Q3 differenced model summary:")
+print(summary(mod_diff))
+
+# Visuals: predicted vs actual
+model_df <- model_df %>% mutate(predicted = predict(mod1, newdata = model_df))
+
+p_q3_pred <- ggplot(model_df, aes(x = year)) +
+  geom_line(aes(y = demand_millions), color = "black", size = 1) +
+  geom_line(aes(y = predicted), color = "blue", linetype = "dashed") +
+  labs(title = "Q3: Actual vs Predicted Demand (millions) - levels model", y = "Demand (millions)") +
+  theme_minimal()
+
+# Residual diagnostics plot
+resid_plot <- ggplot(model_df, aes(x = predicted, y = residuals(mod1))) +
+  geom_point() + geom_hline(yintercept = 0, linetype = "dashed") +
+  labs(title = "Residuals vs Fitted (Q3 model)", x = "Fitted values", y = "Residuals") +
+  theme_minimal()
